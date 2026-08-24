@@ -1,4 +1,4 @@
-export const RENDER_VERSION = 1;
+export const RENDER_VERSION = 2;
 
 const enum Type {
   ActionRow = 1,
@@ -14,6 +14,8 @@ const enum Type {
 const BUTTON_STYLE_LINK = 5;
 const MAX_TOTAL_TEXT = 4000;
 const MAX_COMPONENTS = 40;
+
+const RELAYABLE_CUSTOM_ID = /^modwatch:(follow:(mod|author):[^\s]{1,100}|hist:[^\s]{1,100}:\d{1,4}|noop)$/;
 
 export type RenderValidation =
   | { ok: true; components: object[] }
@@ -41,17 +43,30 @@ function checkMedia(value: unknown): string | null {
 }
 
 function checkButton(value: Record<string, unknown>): string | null {
-  if (value.style !== BUTTON_STYLE_LINK) return 'only link buttons are allowed';
-  if (!isHttpsUrl(value.url)) return 'button url must be https';
-  if (typeof value.label !== 'string' || !value.label || value.label.length > 80) {
-    return 'button label missing or too long';
+  if ('customId' in value) return 'customId is not allowed';
+  if (typeof value.label === 'string' && value.label.length > 80) return 'button label too long';
+
+  if (value.style === BUTTON_STYLE_LINK) {
+    if ('custom_id' in value) return 'link buttons may not carry a custom_id';
+    if (!isHttpsUrl(value.url)) return 'button url must be https';
+    if (typeof value.label !== 'string' || !value.label) return 'link button needs a label';
+    return null;
   }
+
+  if (typeof value.style !== 'number' || value.style < 1 || value.style > 4) {
+    return 'unknown button style';
+  }
+  if (typeof value.custom_id !== 'string' || !RELAYABLE_CUSTOM_ID.test(value.custom_id)) {
+    return 'custom_id is not relayable';
+  }
+  if ('url' in value) return 'interactive buttons may not carry a url';
   return null;
 }
 
 function checkComponent(value: unknown, ctx: Ctx, insideContainer: boolean): string | null {
   if (!isRecord(value)) return 'component must be an object';
-  if ('custom_id' in value || 'customId' in value) return 'custom_id is not allowed';
+  if ('customId' in value) return 'customId is not allowed';
+  if ('custom_id' in value && value.type !== Type.Button) return 'custom_id is not allowed here';
   if ((ctx.componentCount += 1) > MAX_COMPONENTS) return 'too many components';
 
   switch (value.type) {
@@ -106,7 +121,7 @@ function checkComponent(value: unknown, ctx: Ctx, insideContainer: boolean): str
       if (value.accessory !== undefined) {
         if (!isRecord(value.accessory)) return 'section accessory must be an object';
         if (value.accessory.type !== Type.Thumbnail && value.accessory.type !== Type.Button) {
-          return 'section accessory must be a thumbnail or link button';
+          return 'section accessory must be a thumbnail or button';
         }
         return checkComponent(value.accessory, ctx, insideContainer);
       }

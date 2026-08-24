@@ -105,6 +105,8 @@ then run `/setup` in your server.
 - 🤫 Failures never show up as messages in your channel. `/status` and the log are where
   problems are visible.
 - 🔕 Posts can never ping anyone: every message is sent with mentions disabled.
+- 🔔 The **Follow mod / Follow author** buttons and changelog **pagination** on every post work
+  through 7d2dmodding.com
 
 ---
 

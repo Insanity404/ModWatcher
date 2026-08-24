@@ -41,16 +41,24 @@ export const feedResponseSchema = z
   })
   .passthrough();
 
-export const collectionResponseSchema = z
+export const renderEnvelopeSchema = z
   .object({
     version: z.literal(FEED_VERSION),
     render: z.unknown(),
   })
   .passthrough();
 
+export const followResponseSchema = z
+  .object({
+    following: z.boolean(),
+    label: z.string(),
+  })
+  .passthrough();
+
 export type FeedUpdate = z.infer<typeof feedUpdateSchema>;
 export type FeedResponse = z.infer<typeof feedResponseSchema>;
-export type CollectionResponse = z.infer<typeof collectionResponseSchema>;
+export type RenderEnvelope = z.infer<typeof renderEnvelopeSchema>;
+export type FollowResponse = z.infer<typeof followResponseSchema>;
 
 export function updateSignature(update: FeedUpdate): string {
   return `${update.id}@${update.lastUpdateAt}`;

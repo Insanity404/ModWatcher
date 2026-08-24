@@ -5,6 +5,7 @@ import {
   PermissionFlagsBits,
   SlashCommandBuilder,
   time,
+  type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Client,
   type Interaction,
@@ -67,6 +68,7 @@ export function commandData(): RESTPostAPIChatInputApplicationCommandsJSONBody[]
 }
 
 export async function handleInteraction(interaction: Interaction, ctx: CommandContext): Promise<void> {
+  if (interaction.isButton()) return handleButton(interaction, ctx);
   if (!interaction.isChatInputCommand()) return;
   switch (interaction.commandName) {
     case 'setup':
@@ -78,6 +80,86 @@ export async function handleInteraction(interaction: Interaction, ctx: CommandCo
     default:
       return;
   }
+}
+
+async function handleButton(interaction: ButtonInteraction, ctx: CommandContext): Promise<void> {
+  const id = interaction.customId;
+  if (id === 'modwatch:noop') {
+    await interaction.deferUpdate().catch(() => {});
+    return;
+  }
+  if (id.startsWith('modwatch:follow:')) return handleFollowButton(interaction, ctx);
+  if (id.startsWith('modwatch:hist:')) return handleHistoryButton(interaction, ctx);
+}
+
+async function handleFollowButton(
+  interaction: ButtonInteraction,
+  ctx: CommandContext,
+): Promise<void> {
+  const rest = interaction.customId.slice('modwatch:follow:'.length);
+  const sep = rest.indexOf(':');
+  const kind = rest.slice(0, sep);
+  const key = rest.slice(sep + 1);
+  if ((kind !== 'mod' && kind !== 'author') || !key) return;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  const result = await ctx.feed.postFollow(interaction.user.id, kind, key);
+
+  if (!result.ok) {
+    ctx.logger.warn({ kind: result.kind, target: `${kind}:${key}` }, 'follow relay failed');
+    await interaction
+      .editReply({ content: "Couldn't reach 7d2dmodding.com right now — try again in a bit." })
+      .catch(() => {});
+    return;
+  }
+
+  const label = result.response.label;
+  await interaction
+    .editReply({
+      content: result.response.following
+        ? `🔔 Now following **${label}** — you'll get update DMs from 7d2dmodding.com (unless turned off in the portal), and it shows under your follows there.`
+        : `🔕 No longer following **${label}**.`,
+    })
+    .catch(() => {});
+}
+
+async function handleHistoryButton(
+  interaction: ButtonInteraction,
+  ctx: CommandContext,
+): Promise<void> {
+  const id = interaction.customId;
+  const lastColon = id.lastIndexOf(':');
+  const modId = id.slice('modwatch:hist:'.length, lastColon);
+  const page = Number.parseInt(id.slice(lastColon + 1), 10);
+  if (!modId) return;
+
+  await interaction.deferUpdate().catch(() => {});
+  const result = await ctx.feed.getRender(modId, Number.isFinite(page) ? Math.max(0, page) : 0);
+  const render = result.ok ? validateRender(result.response.render) : null;
+
+  if (!result.ok || !render?.ok) {
+    if (result.ok && render && !render.ok) {
+      ctx.logger.warn({ modId, reason: render.reason }, 'page render rejected');
+    }
+    await interaction
+      .followUp({
+        content:
+          !result.ok && result.kind === 'notFound'
+            ? 'This mod is no longer tracked.'
+            : "Couldn't load that page right now — try again in a bit.",
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => {});
+    return;
+  }
+
+  await interaction
+    .editReply({
+      components: render.components as never,
+      flags: MessageFlags.IsComponentsV2,
+      allowedMentions: { parse: [] },
+    })
+    .catch(() => {});
 }
 
 async function handleSetup(

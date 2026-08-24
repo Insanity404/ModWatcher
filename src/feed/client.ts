@@ -1,9 +1,12 @@
+import type { z } from 'zod';
 import type { Logger } from '../core/logger.js';
 import {
-  collectionResponseSchema,
   feedResponseSchema,
-  type CollectionResponse,
+  followResponseSchema,
+  renderEnvelopeSchema,
   type FeedResponse,
+  type FollowResponse,
+  type RenderEnvelope,
 } from './types.js';
 
 export type FeedFailure = {
@@ -14,7 +17,8 @@ export type FeedFailure = {
 };
 
 export type FeedResult = { ok: true; response: FeedResponse } | FeedFailure;
-export type CollectionResult = { ok: true; response: CollectionResponse } | FeedFailure;
+export type RenderResult = { ok: true; response: RenderEnvelope } | FeedFailure;
+export type FollowResult = { ok: true; response: FollowResponse } | FeedFailure;
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -25,29 +29,53 @@ export class FeedClient {
     private readonly logger: Logger,
   ) {}
 
+  private endpoint(path: string): URL {
+    return new URL(`${this.baseUrl.replace(/\/$/, '')}${path}`);
+  }
+
   async getFeed(since: string, limit: number): Promise<FeedResult> {
     const url = new URL(this.baseUrl);
     url.searchParams.set('since', since);
     url.searchParams.set('limit', String(limit));
-    return this.request(url, feedResponseSchema) as Promise<FeedResult>;
+    return this.request(url, feedResponseSchema);
   }
 
-  async getCollection(slug: string): Promise<CollectionResult> {
-    const url = new URL(`${this.baseUrl.replace(/\/$/, '')}/collections/${slug}`);
-    return this.request(url, collectionResponseSchema) as Promise<CollectionResult>;
+  async getCollection(slug: string): Promise<RenderResult> {
+    return this.request(this.endpoint(`/collections/${slug}`), renderEnvelopeSchema);
   }
 
-  private async request(
+  async getRender(modId: string, page: number): Promise<RenderResult> {
+    const url = this.endpoint(`/render/${encodeURIComponent(modId)}`);
+    url.searchParams.set('page', String(page));
+    return this.request(url, renderEnvelopeSchema);
+  }
+
+  async postFollow(
+    userId: string,
+    targetType: 'mod' | 'author',
+    targetId: string,
+  ): Promise<FollowResult> {
+    return this.request(this.endpoint('/follow'), followResponseSchema, {
+      method: 'POST',
+      body: { userId, targetType, targetId },
+    });
+  }
+
+  private async request<S extends z.ZodTypeAny>(
     url: URL,
-    schema: typeof feedResponseSchema | typeof collectionResponseSchema,
-  ): Promise<FeedResult | CollectionResult> {
+    schema: S,
+    init?: { method?: string; body?: unknown },
+  ): Promise<{ ok: true; response: z.infer<S> } | FeedFailure> {
     let res: Response;
     try {
       res = await fetch(url, {
+        method: init?.method ?? 'GET',
         headers: {
           authorization: `Bearer ${this.key}`,
           'user-agent': 'ModWatcher (+https://7d2dmodding.com)',
+          ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
+        body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
@@ -84,6 +112,6 @@ export class FeedClient {
       );
       return { ok: false, kind: 'malformed', status: res.status };
     }
-    return { ok: true, response: parsed.data } as FeedResult | CollectionResult;
+    return { ok: true, response: parsed.data as z.infer<S> };
   }
 }

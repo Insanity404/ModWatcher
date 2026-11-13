@@ -9,14 +9,20 @@ const deliverySchema = z.object({
   done: z.array(z.string()),
   // Failed cycles so far, per server still owed the update.
   failures: z.record(z.number()),
+  // Whether any server has taken the update. Until one has, a failure is not counted against the
+  // server: Discord, or the way to it, is down for everyone.
+  reached: z.boolean().optional(),
+  // When the update started waiting with no server taking it.
+  heldSince: z.string().optional(),
 });
 
 const stateSchema = z.object({
   cursor: z.string(),
   ledger: z.array(z.string()).default([]),
   guilds: z.record(z.object({ channelId: z.string() })).default({}),
-  // An update some servers already have while others hit a transient Discord failure. Kept on disk
-  // so a restart mid-retry does not post it twice to the servers that got it.
+  // An update still on its way: some servers may have it while others hit a transient Discord
+  // failure, or none can take it yet. Kept on disk so a restart does not post it twice to the
+  // servers that got it.
   delivery: deliverySchema.optional(),
 });
 

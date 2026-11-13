@@ -52,7 +52,11 @@ client.once(Events.ClientReady, (ready) => {
   void ready.application.commands
     .set(commandData())
     .catch((error) => logger.error({ err: error }, 'command registration failed'));
-  const refreshMarks = async () => watcher.setMarkEmojis(await loadMarkEmojis(ready, logger));
+  // A refresh that fails keeps the emojis already in use.
+  const refreshMarks = async () => {
+    const emojis = await loadMarkEmojis(ready, logger);
+    if (emojis) watcher.setMarkEmojis(emojis);
+  };
   void refreshMarks().finally(() => watcher.start());
   setInterval(() => void refreshMarks(), MARK_EMOJI_REFRESH_MS).unref();
 });

@@ -14,8 +14,9 @@ import { NO_MARK_EMOJIS, planMarks, type MarkEmojis, type MarkFacts } from '../m
 
 /**
  * `rejected`: Discord refused this message (a 4xx), so sending it again cannot succeed.
- * `failed`: a 5xx or network error that outlasted one retry, before Discord took the message; worth
- * another try later.
+ * `failed`: a 5xx or network error that outlasted one retry; worth another try later. A dropped
+ * connection or a 500 can come after Discord made the message, so the watcher makes its first later
+ * try within the nonce's few minutes.
  * `unknown`: the request went out and no answer came back, so the message may well exist. Sending it
  * again on a later cycle, past the nonce's window, could post it twice, so it is not retried then.
  */
@@ -23,7 +24,10 @@ export type PostOutcome =
   'sent' | 'missingChannel' | 'missingPermissions' | 'rejected' | 'failed' | 'unknown';
 
 export type PostOptions = {
-  /** Same update, same channel, same nonce: Discord returns the first message instead of a second. */
+  /**
+   * Same update, same channel, same nonce: within a few minutes, Discord returns the first message
+   * instead of a second.
+   */
   nonce?: string;
   marks?: { facts: MarkFacts; emojis: MarkEmojis };
   retryDelayMs?: number;

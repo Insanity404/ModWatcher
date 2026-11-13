@@ -1,8 +1,22 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { markFacts, marksLine, NO_MARK_EMOJIS, reactionsFor, withMarksLine } from './marks.js';
+import type { Client } from 'discord.js';
+import { pino } from 'pino';
+import {
+  loadMarkEmojis,
+  markFacts,
+  marksLine,
+  NO_MARK_EMOJIS,
+  reactionsFor,
+  withMarksLine,
+} from './marks.js';
 
 const EMOJIS = { ai: 'IsAI:1', server: 'ServerSide:2', client: 'ClientSide:3' };
+// The badge lines as 7d2dmodding.com draws them.
+const OVERHAUL_BADGE =
+  '🧱 **Overhaul** — reworks large parts of the game; check compatibility before adding other mods.';
+const CONVERSION_BADGE =
+  '🌍 **Total conversion** — replaces much of the game; best played on its own.';
 const post = (body: string) => [
   {
     type: 17,
@@ -62,11 +76,28 @@ describe('the marks line in a post', () => {
     assert.equal(bodyOf(plain), '## A Mod\n-# marks\n**Author:** x');
 
     const badged = withMarksLine(
-      post('## A Mod\n🧱 **Overhaul**\n**Author:** x'),
+      post(`## A Mod\n${OVERHAUL_BADGE}\n**Author:** x`),
       '-# marks',
       markFacts({ scale: 'overhaul' }),
     );
-    assert.equal(bodyOf(badged), '## A Mod\n🧱 **Overhaul**\n-# marks\n**Author:** x');
+    assert.equal(bodyOf(badged), `## A Mod\n${OVERHAUL_BADGE}\n-# marks\n**Author:** x`);
+
+    const converted = withMarksLine(
+      post(`## A Mod\n${CONVERSION_BADGE}`),
+      '-# marks',
+      markFacts({ scale: 'total-conversion' }),
+    );
+    assert.equal(bodyOf(converted), `## A Mod\n${CONVERSION_BADGE}\n-# marks`);
+  });
+
+  it('goes under the title of an overhaul whose post leaves the badge out', () => {
+    // The feed sends the scale even when 7d2dmodding.com's settings do not draw the badge.
+    const unbadged = withMarksLine(
+      post('## A Mod\n**Author:** x\n**Version:** 2'),
+      '-# marks',
+      markFacts({ scale: 'overhaul' }),
+    );
+    assert.equal(bodyOf(unbadged), '## A Mod\n-# marks\n**Author:** x\n**Version:** 2');
   });
 
   it('is left out rather than take the post past Discord’s text cap', () => {
@@ -79,5 +110,30 @@ describe('the marks line in a post', () => {
     const snapshot = JSON.stringify(original);
     withMarksLine(original, '-# marks', markFacts({}));
     assert.equal(JSON.stringify(original), snapshot);
+  });
+});
+
+describe('the application’s mark emojis', () => {
+  const discord = (fetch: () => Promise<unknown>) =>
+    ({ application: { emojis: { fetch } } }) as unknown as Client<true>;
+  const logger = pino({ level: 'silent' });
+
+  it('are found by name', async () => {
+    const uploaded = discord(async () => [
+      { name: 'isai', identifier: 'IsAI:1' },
+      { name: 'ServerSide', identifier: 'ServerSide:2' },
+    ]);
+    assert.deepEqual(await loadMarkEmojis(uploaded, logger), {
+      ai: 'IsAI:1',
+      server: 'ServerSide:2',
+      client: null,
+    });
+  });
+
+  it('read as nothing at all when Discord cannot list them, so the set in use stays', async () => {
+    const failing = discord(async () => {
+      throw new Error('503 Service Unavailable');
+    });
+    assert.equal(await loadMarkEmojis(failing, logger), null);
   });
 });

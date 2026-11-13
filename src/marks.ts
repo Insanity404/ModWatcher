@@ -9,7 +9,7 @@ import type { Logger } from './core/logger.js';
 export type MarkFacts = {
   aiTags: string[];
   side: 'server' | 'client' | 'both' | null;
-  /** An overhaul or total conversion draws a badge line under the title. */
+  /** An overhaul or a total conversion, whose post may carry a badge line under the title. */
   scale: string | null;
 };
 
@@ -30,6 +30,16 @@ const SIDE_TEXT: Record<NonNullable<MarkFacts['side']>, string> = {
 /** Discord's cap on the text across a message's components. */
 const MAX_TEXT = 4000;
 
+/**
+ * How the badge line 7d2dmodding.com draws under the title of an overhaul or a total conversion
+ * begins; the words after it may change. The line is drawn only when the post's settings there show
+ * it, while the feed sends the scale either way, so the line itself is what says it is there.
+ */
+const SCALE_BADGES = new Map([
+  ['overhaul', '🧱 **Overhaul**'],
+  ['total-conversion', '🌍 **Total conversion**'],
+]);
+
 export function markFacts(source: {
   aiTags?: string[] | null;
   side?: string | null;
@@ -42,7 +52,11 @@ export function markFacts(source: {
   return { aiTags: source.aiTags ?? [], side, scale: source.scale ?? null };
 }
 
-export async function loadMarkEmojis(client: Client<true>, logger: Logger): Promise<MarkEmojis> {
+/** The application's mark emojis, or null when they could not be read. */
+export async function loadMarkEmojis(
+  client: Client<true>,
+  logger: Logger,
+): Promise<MarkEmojis | null> {
   try {
     const emojis = await client.application.emojis.fetch();
     const find = (name: string) =>
@@ -58,8 +72,11 @@ export async function loadMarkEmojis(client: Client<true>, logger: Logger): Prom
     );
     return found;
   } catch (error) {
-    logger.warn({ err: error }, 'could not read the application emojis; marks are written as text');
-    return NO_MARK_EMOJIS;
+    logger.warn(
+      { err: error },
+      'could not read the application emojis; keeping any in use (none at startup: marks as text)',
+    );
+    return null;
   }
 }
 
@@ -112,7 +129,9 @@ export function withMarksLine(components: object[], line: string, facts: MarkFac
   if (!body || total + line.length + 1 > MAX_TEXT) return components;
 
   const lines = body.content.split('\n');
-  lines.splice(Math.min(facts.scale ? 2 : 1, lines.length), 0, line);
+  const badge = facts.scale ? SCALE_BADGES.get(facts.scale) : undefined;
+  const badged = !!badge && !!lines[1]?.startsWith(badge);
+  lines.splice(badged ? 2 : 1, 0, line);
   const patched = children.map((child) =>
     child === body ? { ...body, content: lines.join('\n') } : child,
   );

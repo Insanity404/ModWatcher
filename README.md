@@ -129,12 +129,27 @@ from an empty folder with a fake token to check it gets as far as the Discord lo
 
 - 🕐 A new install (or newly bound channel) starts with the **next** update; it does not backfill.
 - 😴 If 7d2dmodding.com is unreachable, the bot backs off quietly (up to 30 min between retries).
-  While it's behind, it catches up at up to 5 posts every 15 seconds until it's current.
-- 📮 If Discord has a hiccup (a server error, a dropped connection), the post is retried on the
-  next cycles and later updates wait their turn. Servers that already got it don't get it twice.
-  After 5 failed cycles the bot gives up on that post for that server, logs a warning, and stops
-  holding later posts back for that server until one goes through again. A post Discord took but
-  never confirmed is not sent again, so nothing is posted twice.
+  While it's behind, it catches up at up to 5 posts every 15 seconds until it's current. If the
+  feed key hits its hourly request limit, the bot drops to the normal polling pace until it's
+  current again, so once the limit resets, the Follow and changelog buttons get the rest of the
+  key's hourly requests.
+- 📮 If Discord has a hiccup (a server error, a dropped connection), the post is retried within a
+  minute, then on each poll, and later updates wait their turn. Servers that already got it don't
+  get it twice, even across a restart.
+- 🛟 While no server has taken an update (Discord is down, or the bot can't reach it), the bot
+  holds the update, and every update behind it, and posts them all in order once Discord takes
+  posts again. A server that refuses the post (a missing permission or channel) doesn't count as
+  taking it, and neither does a post Discord never answered. After a day of holding, the 5-cycle
+  rule below applies to that post, so a copy that can never post moves on about one post a day,
+  and posts the rest, oldest first, once it can.
+- 🚧 When a server keeps failing while others take the post, the bot gives up on that post for
+  that server after 5 failed cycles and logs a warning. From then on that server's failures stop
+  holding later posts back, even ones no server has taken, until one goes through to it again.
+- 🔁 Every send of a post carries the same nonce, and Discord drops a repeat that comes within a
+  few minutes, so the retries in that first minute can't post it twice. A dropped connection or a
+  server error can hide a post Discord did make, though: if Discord is still failing a minute
+  later, a later retry can post it twice. A post Discord never answered at all is not sent again
+  on a later cycle.
 - 🤫 Failures never show up as messages in your channel. `/status` and the log are where
   problems are visible.
 - 🔕 Posts can never ping anyone: every message is sent with mentions disabled.

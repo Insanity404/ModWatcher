@@ -12,11 +12,24 @@ const MAX_POSTS_PER_CYCLE = 5;
 /** Gap between cycles while draining a backlog — long enough to stay polite, short enough to catch up. */
 const CATCH_UP_DELAY_MS = 15_000;
 /**
- * Cycles a server may keep failing transiently (5xx, network) on one update before the feed moves
- * on without it. Until then later updates wait too, so a short Discord outage delays posts rather
- * than dropping them, and no server gets them out of order.
+ * Cycles a server may keep failing transiently (5xx, network) on an update another server took,
+ * before the feed moves on without it. Until then later updates wait too, so no server gets them
+ * out of order.
  */
 const MAX_DELIVERY_CYCLES = 5;
+/**
+ * How long an update no server has taken is held without counting its failures. A failure
+ * everywhere means Discord, or the way to it, is down, and the backlog waits that out. Held this
+ * long, the bot is more likely broken for good, and the cycles count again so it cannot stall
+ * forever.
+ */
+const MAX_HOLD_MS = 24 * 60 * 60_000;
+/**
+ * The first retry of a failed post comes this soon. A dropped connection or a 5xx can come after
+ * Discord made the post, and a resend within the nonce's few minutes returns that post instead of
+ * making a second.
+ */
+const FIRST_RETRY_DELAY_MS = 60_000;
 const FEED_PAGE_LIMIT = 100;
 const FIRST_POLL_DELAY_MS = 5_000;
 const BACKOFF_BASE_MS = 30_000;
@@ -47,11 +60,20 @@ export class Watcher {
   private retryingPost = false;
   private markEmojis: MarkEmojis = NO_MARK_EMOJIS;
   /**
-   * Servers that already used up their retries on an earlier update. Holding every later update back
-   * for each of them in turn would slow the feed for everyone else to a crawl, so their next failure
-   * is given up on straight away. A post that goes through clears the mark.
+   * Servers that used up their retries on an earlier update while another server took it. Holding
+   * every later update back for each of them in turn would slow the feed for everyone else to a
+   * crawl, so their next failure is given up on straight away, even on an update no server took:
+   * the other servers' posts of it may have been refused or never answered. A post that goes
+   * through clears the mark.
    */
   private readonly degraded = new Set<string>();
+  /** Whether the cycle that just stalled was its update's first try (see FIRST_RETRY_DELAY_MS). */
+  private retrySoon = false;
+  /**
+   * Set by a rate limit and kept until the feed is caught up. The key's hourly budget is shared with
+   * the Follow and history buttons, so the rest of a catch-up goes at the poll interval.
+   */
+  private slowCatchUp = false;
 
   constructor(
     private readonly client: Client,
@@ -122,11 +144,17 @@ export class Watcher {
          * Being behind is not a reason to wait. Either the server told us the window was truncated
          * (`hasMore`) or we stopped early on MAX_POSTS_PER_CYCLE — in both cases the next page is
          * already sitting there, and sleeping the full interval between five-post cycles is what
-         * turns a busy release hour into a backlog that takes all day to clear. A stalled cycle
-         * keeps the normal interval: the next one retries a post Discord just failed to take.
+         * turns a busy release hour into a backlog that takes all day to clear. After a rate limit,
+         * though, the rest of the catch-up keeps the normal interval (see slowCatchUp). A stalled
+         * cycle keeps it too: the next one retries a post Discord just failed to take, and only an
+         * update's first retry comes sooner.
          */
         if (end === 'capped' || (end === 'drained' && result.response.hasMore === true)) {
-          nextDelayMs = CATCH_UP_DELAY_MS;
+          if (!this.slowCatchUp) nextDelayMs = CATCH_UP_DELAY_MS;
+        } else if (end === 'drained') {
+          this.slowCatchUp = false;
+        } else if (end === 'stalled' && this.retrySoon) {
+          nextDelayMs = Math.min(nextDelayMs, FIRST_RETRY_DELAY_MS);
         }
       }
     } catch (error) {
@@ -148,6 +176,7 @@ export class Watcher {
     }
     if (failure.kind === 'rateLimited') {
       this.lastProblem = 'feed rate limit reached';
+      this.slowCatchUp = true;
       this.logger.warn({ retryAfterMs: failure.retryAfterMs }, 'feed rate limited');
       return failure.retryAfterMs ?? 60_000;
     }
@@ -222,12 +251,15 @@ export class Watcher {
     signature: string,
     components: object[],
   ): Promise<boolean> {
-    const progress = this.state.deliveryFor(signature) ?? { signature, done: [], failures: {} };
+    const saved = this.state.deliveryFor(signature);
+    const progress = saved ?? { signature, done: [], failures: {} };
     const marks = { facts: markFacts(update), emojis: this.markEmojis };
-    let owed = false;
+    const remaining = this.state
+      .bindings()
+      .filter(({ guildId }) => !progress.done.includes(guildId));
+    const failed: typeof remaining = [];
 
-    for (const { guildId, channelId } of this.state.bindings()) {
-      if (progress.done.includes(guildId)) continue;
+    for (const [index, { guildId, channelId }] of remaining.entries()) {
       const outcome = await this.post(this.client, channelId, components, this.logger, {
         nonce: postNonce(signature, channelId),
         marks,
@@ -235,19 +267,11 @@ export class Watcher {
       const where = { guildId, channelId, id: update.id };
 
       if (outcome === 'failed') {
-        const failures = (progress.failures[guildId] ?? 0) + 1;
-        if (failures < MAX_DELIVERY_CYCLES && !this.degraded.has(guildId)) {
-          progress.failures[guildId] = failures;
-          owed = true;
-          this.logger.warn({ ...where, failures }, 'post failed, retrying next cycle');
-          continue;
-        }
-        this.degraded.add(guildId);
-        this.logger.warn(
-          { ...where, failures },
-          'post kept failing, giving up on it for this server',
-        );
-      } else if (outcome === 'sent') {
+        failed.push({ guildId, channelId });
+        continue;
+      }
+      if (outcome === 'sent') {
+        progress.reached = true;
         this.degraded.delete(guildId);
         this.lastPostAt = new Date().toISOString();
       } else if (outcome === 'unknown') {
@@ -260,9 +284,57 @@ export class Watcher {
       }
       progress.done.push(guildId);
       delete progress.failures[guildId];
+      // Saved as it goes, so a restart partway through does not post again where it may already be.
+      if ((outcome === 'sent' || outcome === 'unknown') && index < remaining.length - 1) {
+        await this.state.saveDelivery(progress);
+      }
+    }
+
+    /*
+     * Failures are judged once every server has been tried. Until some server takes the update, in
+     * this cycle or an earlier one, the fault is not any one server's but Discord's, or the way to
+     * it: the update is held without counting, however long the backlog behind it grows. Only a
+     * post that went out counts as taken. A missing permission or channel is mostly known from the
+     * cache, without asking Discord at all, and a post never answered may not be there. A server
+     * already given up on is not held (see degraded), and past a day of holding, the cycles count
+     * again.
+     */
+    let holding = false;
+    if (failed.length && !progress.reached) {
+      progress.heldSince ??= new Date().toISOString();
+      holding = Date.now() - Date.parse(progress.heldSince) < MAX_HOLD_MS;
+    }
+    let owed = false;
+    for (const { guildId, channelId } of failed) {
+      const where = { guildId, channelId, id: update.id };
+      if (holding && !this.degraded.has(guildId)) {
+        owed = true;
+        this.logger.warn(
+          { ...where, heldSince: progress.heldSince },
+          'post failed and no server has taken it; holding it until one does',
+        );
+        continue;
+      }
+      const failures = (progress.failures[guildId] ?? 0) + 1;
+      if (failures < MAX_DELIVERY_CYCLES && !this.degraded.has(guildId)) {
+        progress.failures[guildId] = failures;
+        owed = true;
+        this.logger.warn({ ...where, failures }, 'post failed, retrying next cycle');
+        continue;
+      }
+      // Running out after a day of holding an update no server took says nothing against this
+      // server in particular, so the next update is held for it again.
+      if (progress.reached) this.degraded.add(guildId);
+      this.logger.warn(
+        { ...where, failures },
+        'post kept failing, giving up on it for this server',
+      );
+      progress.done.push(guildId);
+      delete progress.failures[guildId];
     }
 
     if (owed) await this.state.saveDelivery(progress);
+    this.retrySoon = owed && !saved;
     return !owed;
   }
 }

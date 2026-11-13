@@ -1,0 +1,197 @@
+# main: every push rebuilds ModWatcher.zip and refreshes the rolling "Latest build" release, so
+#   https://github.com/Insanity404/ModWatcher/releases/latest/download/ModWatcher.zip always
+#   serves the newest build. That release is the only one ever marked Latest.
+# vX.Y.Z tags: a permanent release with ModWatcher-vX.Y.Z.zip and notes, never marked Latest.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions: {}
+
+# One queue per ref and never cancelled mid-publish: main runs publish in push order (a newer
+# push waits and replaces any older queued run), and each tag runs on its own.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build the zip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.smoke.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs the pnpm named in package.json "packageManager", the version that wrote the lockfile.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          # Zip timestamps come from the commit, so the same commit always gives the same bytes.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          if [ -n "$TAG" ]; then
+            node scripts/build-release.mjs --tag "$TAG"
+          else
+            node scripts/build-release.mjs
+          fi
+
+      - name: Smoke test (the bundle alone, outside the repo)
+        id: smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cp release/ModWatcher/modwatcher.mjs "$RUNNER_TEMP/smoke/"
+          version="$(cd "$RUNNER_TEMP/smoke" && node modwatcher.mjs --version)"
+          expected="$(node -p "require('./package.json').version")"
+          case "$version" in
+            "$expected" | "$expected+"*) echo "The bundle loads and reports $version" ;;
+            *) echo "::error::The bundle reports '$version', expected $expected"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            release/*.zip
+            release/notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  latest:
+    name: Refresh the Latest build
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      - name: Publish ModWatcher.zip
+        run: |
+          set -euo pipefail
+          asset=ModWatcher.zip
+          tag="build-${GITHUB_SHA::7}"
+          title="Latest build ($VERSION)"
+
+          # The rolling release sits on a build-<commit> tag and is moved to a fresh tag on every
+          # push. Force-moving one fixed tag instead would make `git pull --tags` (VS Code's
+          # default sync) fail in every clone with "would clobber existing tag".
+          current="$(gh release list --limit 1000 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("build-"))][0].tagName // ""')"
+
+          if [ -z "$current" ]; then
+            gh release create "$tag" "dist/$asset" --target "$GITHUB_SHA" \
+              --title "$title" --notes-file dist/notes.md --latest
+          else
+            # Upload under a temporary name, then swap names: the stable download link is
+            # never missing for longer than one API call.
+            temp="ModWatcher-${GITHUB_SHA::7}.zip"
+            cp "dist/$asset" "dist/$temp"
+            gh release upload "$current" "dist/$temp" --clobber
+            id="$(gh api "repos/$GH_REPO/releases/tags/$current" --jq .id)"
+            assets="repos/$GH_REPO/releases/$id/assets"
+            old="$(gh api "$assets" --paginate --jq ".[] | select(.name == \"$asset\") | .id")"
+            new="$(gh api "$assets" --paginate --jq ".[] | select(.name == \"$temp\") | .id")"
+            if [ -n "$old" ]; then gh api -X DELETE "repos/$GH_REPO/releases/assets/$old"; fi
+            gh api -X PATCH "repos/$GH_REPO/releases/assets/$new" -f name="$asset" --silent
+            # Point the release at this commit (GitHub creates the new tag) and keep it Latest.
+            gh release edit "$current" --tag "$tag" --target "$GITHUB_SHA" \
+              --title "$title" --notes-file dist/notes.md --latest
+          fi
+
+          # Retire older build tags: no release uses them any more.
+          gh api "repos/$GH_REPO/git/matching-refs/tags/build-" --paginate --jq '.[].ref' |
+            while read -r ref; do
+              if [ "$ref" != "refs/tags/$tag" ]; then
+                gh api -X DELETE "repos/$GH_REPO/git/$ref" --silent
+              fi
+            done
+
+  version:
+    name: Publish the versioned release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      - name: Publish ModWatcher-${{ github.ref_name }}.zip
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists. Versioned releases are permanent; left as is."
+            exit 0
+          fi
+
+          if [ -s dist/notes.md ]; then
+            notes=(--notes-file dist/notes.md)
+          else
+            # No CHANGELOG.md section: GitHub writes the notes, counted from the previous version
+            # tag (left to itself it could count from the rolling build-* release instead).
+            tags="$(gh api "repos/$GH_REPO/git/matching-refs/tags/v" --paginate \
+              --jq '.[].ref | ltrimstr("refs/tags/")')"
+            previous=""
+            while read -r t; do
+              if [ "$t" = "$TAG" ]; then break; fi
+              previous="$t"
+            done < <(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V)
+            if [ -n "$previous" ]; then
+              notes=(--generate-notes --notes-start-tag "$previous")
+            else
+              notes=(--notes "First versioned release of Mod Watcher.")
+            fi
+          fi
+
+          # --latest=false: the Latest badge stays on the rolling build. gh uploads the zip to a
+          # draft and publishes it only once the upload succeeded.
+          gh release create "$TAG" "dist/ModWatcher-$TAG.zip" --verify-tag --latest=false \
+            --title "Mod Watcher $TAG" "${notes[@]}"

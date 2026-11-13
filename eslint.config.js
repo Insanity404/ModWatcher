@@ -7,6 +7,6 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   eslintConfigPrettier,
   {
-    ignores: ['dist/**', 'node_modules/**', 'tmp/**', 'data/**'],
+    ignores: ['dist/**', 'release/**', 'node_modules/**', 'tmp/**', 'data/**'],
   },
 );

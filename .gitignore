@@ -15,6 +15,7 @@ pnpm-debug.log*
 dist/
 build/
 out/
+release/
 
 .DS_Store
 Thumbs.db

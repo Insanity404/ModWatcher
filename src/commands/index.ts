@@ -14,9 +14,11 @@ import {
 import type { BotConfig } from '../core/config.js';
 import type { Logger } from '../core/logger.js';
 import type { FeedClient } from '../feed/client.js';
+import { canReactIn, MARK_EMOJI_NAMES, markFacts, planMarks, reactionsFor } from '../marks.js';
 import { canPostIn, resolvePostChannel } from '../poster/post.js';
 import { validateRender } from '../render/validate.js';
 import type { StateStore } from '../state/store.js';
+import { VERSION } from '../version.js';
 import type { Watcher } from '../watcher.js';
 
 export type CommandContext = {
@@ -67,7 +69,10 @@ export function commandData(): RESTPostAPIChatInputApplicationCommandsJSONBody[]
   ];
 }
 
-export async function handleInteraction(interaction: Interaction, ctx: CommandContext): Promise<void> {
+export async function handleInteraction(
+  interaction: Interaction,
+  ctx: CommandContext,
+): Promise<void> {
   if (interaction.isButton()) return handleButton(interaction, ctx);
   if (!interaction.isChatInputCommand()) return;
   switch (interaction.commandName) {
@@ -153,9 +158,23 @@ async function handleHistoryButton(
     return;
   }
 
+  // The page keeps the marks the post went out with: written into it where they could not be
+  // reactions. Its reactions stay on the message, so a page never adds them again.
+  const channel = interaction.inGuild()
+    ? resolvePostChannel(ctx.client, interaction.channelId)
+    : null;
+  const components = channel
+    ? planMarks(
+        channel,
+        render.components,
+        markFacts(result.response.marks ?? {}),
+        ctx.watcher.marks(),
+      ).components
+    : render.components;
+
   await interaction
     .editReply({
-      components: render.components as never,
+      components: components as never,
       flags: MessageFlags.IsComponentsV2,
       allowedMentions: { parse: [] },
     })
@@ -197,9 +216,30 @@ async function handleSetup(
   await ctx.state.setBinding(interaction.guildId, choice.id);
   ctx.logger.info({ guildId: interaction.guildId, channelId: choice.id }, 'channel bound');
   await interaction.reply({
-    content: `Done — mod updates will post in <#${choice.id}>.`,
+    content:
+      `Done — mod updates will post in <#${choice.id}>.` +
+      (canReactIn(channel)
+        ? ''
+        : '\nMods made with generative AI, and who installs each mod, are marked as reactions when ' +
+          'I also have **Add Reactions** and **Read Message History** there; without them the marks ' +
+          'are written into each post instead.'),
     flags: MessageFlags.Ephemeral,
   });
+}
+
+/** How marks show in a channel: as reactions, or written into the post, and why. */
+function describeMarks(ctx: CommandContext, channelId: string): string {
+  const all = { aiTags: ['AI'], side: 'both' as const, scale: null };
+  const emojis = ctx.watcher.marks();
+  if (!reactionsFor(all, emojis)) {
+    const names = Object.values(MARK_EMOJI_NAMES).join(', ');
+    return `written into each post (this application has no ${names} emojis uploaded)`;
+  }
+  const channel = resolvePostChannel(ctx.client, channelId);
+  if (channel && !canReactIn(channel)) {
+    return 'written into each post here (I need **Add Reactions** and **Read Message History** for reactions)';
+  }
+  return 'reactions';
 }
 
 function describeChannelHealth(client: Client, channelId: string): string {
@@ -226,12 +266,16 @@ async function handleStatus(
       status.lastPollOk ? 'OK' : (status.lastProblem ?? 'not yet polled')
     }`,
     `**Next poll:** ${stamp(status.nextPollAt)}`,
-    `**Last update posted:** ${stamp(status.lastPostAt)}`,
+    `**Last update posted:** ${stamp(status.lastPostAt)}${
+      status.retryingPost ? ' — retrying one Discord failed to take (see the log)' : ''
+    }`,
     `**This server:** ${
       bound
         ? `posting in <#${bound}>${describeChannelHealth(ctx.client, bound)}`
         : 'no channel bound — run `/setup`'
     }`,
+    ...(bound ? [`**Marks:** ${describeMarks(ctx, bound)}`] : []),
+    `**Version:** ${VERSION}`,
   ];
 
   await interaction.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
@@ -264,7 +308,10 @@ async function handleCollectionShow(
 
   if (!result.ok || !render?.ok) {
     if (!result.ok && result.kind !== 'notFound') {
-      ctx.logger.warn({ slug, kind: !result.ok ? result.kind : 'render' }, 'collection fetch failed');
+      ctx.logger.warn(
+        { slug, kind: !result.ok ? result.kind : 'render' },
+        'collection fetch failed',
+      );
     }
     await interaction.deleteReply().catch(() => {});
     await interaction

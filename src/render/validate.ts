@@ -14,12 +14,13 @@ const enum Type {
 const BUTTON_STYLE_LINK = 5;
 const MAX_TOTAL_TEXT = 4000;
 const MAX_COMPONENTS = 40;
+// Discord's limit. The pattern below admits longer ids, and one of those gets the post refused.
+const MAX_CUSTOM_ID = 100;
 
-const RELAYABLE_CUSTOM_ID = /^modwatch:(follow:(mod|author):[^\s]{1,100}|hist:[^\s]{1,100}:\d{1,4}|noop)$/;
+const RELAYABLE_CUSTOM_ID =
+  /^modwatch:(follow:(mod|author):[^\s]{1,100}|hist:[^\s]{1,100}:\d{1,4}|noop)$/;
 
-export type RenderValidation =
-  | { ok: true; components: object[] }
-  | { ok: false; reason: string };
+export type RenderValidation = { ok: true; components: object[] } | { ok: false; reason: string };
 
 type Ctx = { componentCount: number; textTotal: number };
 
@@ -59,6 +60,7 @@ function checkButton(value: Record<string, unknown>): string | null {
   if (typeof value.custom_id !== 'string' || !RELAYABLE_CUSTOM_ID.test(value.custom_id)) {
     return 'custom_id is not relayable';
   }
+  if (value.custom_id.length > MAX_CUSTOM_ID) return 'custom_id too long';
   if ('url' in value) return 'interactive buttons may not carry a url';
   return null;
 }
@@ -97,18 +99,28 @@ function checkComponent(value: unknown, ctx: Ctx, insideContainer: boolean): str
     case Type.Button:
       return checkButton(value);
     case Type.ActionRow: {
-      if (!Array.isArray(value.components) || !value.components.length || value.components.length > 5) {
+      if (
+        !Array.isArray(value.components) ||
+        !value.components.length ||
+        value.components.length > 5
+      ) {
         return 'action row needs 1-5 components';
       }
       for (const child of value.components) {
-        if (!isRecord(child) || child.type !== Type.Button) return 'action rows may hold only buttons';
+        if (!isRecord(child) || child.type !== Type.Button) {
+          return 'action rows may hold only buttons';
+        }
         const problem = checkComponent(child, ctx, insideContainer);
         if (problem) return problem;
       }
       return null;
     }
     case Type.Section: {
-      if (!Array.isArray(value.components) || !value.components.length || value.components.length > 3) {
+      if (
+        !Array.isArray(value.components) ||
+        !value.components.length ||
+        value.components.length > 3
+      ) {
         return 'section needs 1-3 text components';
       }
       for (const child of value.components) {

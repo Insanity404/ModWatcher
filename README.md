@@ -33,6 +33,26 @@ It is deliberately minimal, and the permissions prove it:
 | 🛰️ Gateway intents | `Guilds` only — it never reads messages, members, or presence |
 | 🔗 Invite scopes | `bot`, `applications.commands` |
 | 🔒 Channel permissions | **View Channel**, **Send Messages** |
+| 🏷️ Optional, for marks as reactions | **Add Reactions**, **Read Message History** |
+
+---
+
+## 🏷️ Marks
+
+Every post says whether the mod was **made with generative AI** (from its Nexus tags) and **who
+installs it**: the server only, each player, or both. On 7d2dmodding.com these are reactions, and
+this bot does the same when it can:
+
+- Upload three emojis to **your bot's application** in the
+  [Developer Portal](https://discord.com/developers/applications) (your app → **Emojis**), named
+  exactly `IsAI`, `ServerSide` and `ClientSide`. An app's own emojis work in every server it is
+  in, with no extra permission for them. The bot picks them up when it starts, and every few hours
+  after that.
+- Give the bot **Add Reactions** and **Read Message History** in the posting channel.
+
+Without either, the marks are written into the post instead, as a small line under the title —
+`Made with generative AI (AI Media) · Server-side only`. `/status` shows which way your server
+gets them.
 
 ---
 
@@ -40,8 +60,9 @@ It is deliberately minimal, and the permissions prove it:
 
 - 🎟️ **Invite the official bot** — no hosting needed. It posts the feed as configured by
   7d2dmodding.com. Run `/setup channel:#your-channel` and you're done.
-- 🛠️ **Self-host this repo** — your own Discord application, your own feed key, your own filters
-  (configured on your 7d2dmodding.com account page).
+- 🛠️ **Self-host your own copy** — download a release (Node.js 24 is all it needs) and run it with
+  your own Discord application, your own feed key, your own filters (configured on your
+  7d2dmodding.com account page).
 
 ---
 
@@ -50,7 +71,7 @@ It is deliberately minimal, and the permissions prove it:
 | Command | Who | What |
 | --- | --- | --- |
 | `/setup channel:#…` | Manage Server | Pick the channel mod updates post in. Run with no option to check the current one. |
-| `/status` | Manage Server | Ephemeral health check: last poll, last post, channel binding. |
+| `/status` | Manage Server | Ephemeral health check: last poll, last post, channel binding, running version. |
 | `/collection show link:…` | everyone | Share a 7d2dmodding.com mod collection in the channel. |
 
 That's the whole surface. Setup of *what* gets posted (filters by source, author, or mod, and
@@ -70,43 +91,78 @@ No privileged intents are needed.
 Sign in at [7d2dmodding.com](https://7d2dmodding.com) and create your API key (one per user).
 Configure filters and output there too.
 
-### 3. 🧰 Configure
+### 3. 📦 Download
 
-Copy `.env.example` to `.env` and fill in `DISCORD_TOKEN` and `FEED_KEY`.
+**[⬇️ ModWatcher.zip](https://github.com/Insanity404/ModWatcher/releases/latest/download/ModWatcher.zip)**
+is always the newest build. Fixed versions are on the
+[Releases page](https://github.com/Insanity404/ModWatcher/releases). No cloning, no build step:
 
-### 4. 🎮 Run
+1. Install [Node.js 24](https://nodejs.org/), 24.22.1 or newer.
+2. Unzip. You get a `ModWatcher` folder.
+3. In it, copy `.env.example` to `.env`.
+4. Fill in `DISCORD_TOKEN` and `FEED_KEY` in `.env`.
+5. Run `start.cmd` (Windows, double-click works) or `./start.sh` (Linux/macOS).
 
-Node 24+ and [pnpm](https://pnpm.io):
+The first log line shows the version you are running (`node modwatcher.mjs --version` prints it
+too). To update, extract the new zip over the same folder: `.env` and `data/` are not in the
+zip, so they are kept.
 
-```sh
-pnpm install
-pnpm build
-pnpm start
-```
-
-For development: `pnpm dev`.
-
-### 5. 📬 Invite it
+### 4. 📬 Invite it
 
 Scopes `bot applications.commands`, permissions **View Channel** + **Send Messages**,
 then run `/setup` in your server.
 
-> 💡 The bot keeps one small JSON state file (`./data/state.json` by default): its position in
-> the feed, a short ledger of what it already posted, and each server's chosen channel. Delete
-> it to reset — a fresh state starts from *now* and never back-posts history.
+> 💡 The bot keeps one small JSON state file (`data/state.json` in its folder by default): its
+> position in the feed, a short ledger of what it already posted, and each server's chosen
+> channel. Delete it to reset — a fresh state starts from *now* and never back-posts history.
+
+### 🧑‍💻 From source
+
+Node 24 (24.22.1 or newer) and [pnpm](https://pnpm.io): `pnpm install`, `pnpm build`,
+`pnpm start` (or `pnpm dev` while developing), with the same `.env`. `pnpm test` runs the tests.
+`pnpm build:release` builds the release zip into `release/`, and `pnpm smoke:release` runs it
+from an empty folder with a fake token to check it gets as far as the Discord login.
 
 ---
 
 ## 🧠 Behaviour Worth Knowing
 
 - 🕐 A new install (or newly bound channel) starts with the **next** update; it does not backfill.
-- 😴 If 7d2dmodding.com is unreachable, the bot backs off quietly (up to 30 min between retries)
-  and catches up at a steady pace — at most a handful of posts per cycle, never a flood.
+- 😴 If 7d2dmodding.com is unreachable, the bot backs off quietly (up to 30 min between retries).
+  While it's behind, it catches up at up to 5 posts every 15 seconds until it's current.
+- 📮 If Discord has a hiccup (a server error, a dropped connection), the post is retried on the
+  next cycles and later updates wait their turn. Servers that already got it don't get it twice.
+  After 5 failed cycles the bot gives up on that post for that server, logs a warning, and stops
+  holding later posts back for that server until one goes through again. A post Discord took but
+  never confirmed is not sent again, so nothing is posted twice.
 - 🤫 Failures never show up as messages in your channel. `/status` and the log are where
   problems are visible.
 - 🔕 Posts can never ping anyone: every message is sent with mentions disabled.
 - 🔔 The **Follow mod / Follow author** buttons and changelog **pagination** on every post work
   through 7d2dmodding.com
+
+---
+
+## 🏷️ Cutting a Release
+
+Every push to `main` rebuilds `ModWatcher.zip` and refreshes the **Latest build** release, which
+is the only one GitHub marks **Latest**. A version that stays downloadable for good:
+
+1. Optionally add a `## [1.2.0]` section to `CHANGELOG.md`; it becomes the release notes.
+   Without one, GitHub generates them: merged pull requests and a compare link from the
+   previous version.
+2. Set `"version": "1.2.0"` in `package.json`, commit, and push `main`.
+3. Tag that commit and push the tag:
+
+   ```sh
+   git tag -a v1.2.0 -m "Mod Watcher 1.2.0"
+   git push origin v1.2.0
+   ```
+
+The workflow publishes release **v1.2.0** with `ModWatcher-v1.2.0.zip`. A tag that does not
+match `package.json` stops the run before anything is published. Push tags by name (or with
+`--follow-tags`), never `--tags`: a clone collects the rolling release's old `build-…` tags, and
+`--tags` would publish them again.
 
 ---
 

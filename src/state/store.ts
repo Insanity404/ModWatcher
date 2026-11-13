@@ -1,18 +1,34 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+
+const deliverySchema = z.object({
+  signature: z.string(),
+  // Servers finished with this update: posted, refused for good, or given up on.
+  done: z.array(z.string()),
+  // Failed cycles so far, per server still owed the update.
+  failures: z.record(z.number()),
+});
 
 const stateSchema = z.object({
   cursor: z.string(),
   ledger: z.array(z.string()).default([]),
   guilds: z.record(z.object({ channelId: z.string() })).default({}),
+  // An update some servers already have while others hit a transient Discord failure. Kept on disk
+  // so a restart mid-retry does not post it twice to the servers that got it.
+  delivery: deliverySchema.optional(),
 });
 
 type StateFile = z.infer<typeof stateSchema>;
+export type Delivery = z.infer<typeof deliverySchema>;
 
 const LEDGER_MAX = 500;
 
 export class StateStore {
+  // Every write queues here: overlapping writes would race each other's rename of the file.
+  private saving: Promise<void> = Promise.resolve();
+
   private constructor(
     private readonly filePath: string,
     private readonly state: StateFile,
@@ -67,6 +83,17 @@ export class StateStore {
       this.state.ledger.splice(0, this.state.ledger.length - LEDGER_MAX);
     }
     if (cursor > this.state.cursor) this.state.cursor = cursor;
+    if (this.state.delivery?.signature === signature) delete this.state.delivery;
+    await this.save();
+  }
+
+  /** Retry progress when `signature` is the update being redelivered, otherwise null. */
+  deliveryFor(signature: string): Delivery | null {
+    return this.state.delivery?.signature === signature ? this.state.delivery : null;
+  }
+
+  async saveDelivery(delivery: Delivery): Promise<void> {
+    this.state.delivery = delivery;
     await this.save();
   }
 
@@ -93,10 +120,22 @@ export class StateStore {
     }
   }
 
-  private async save(): Promise<void> {
+  private save(): Promise<void> {
+    const write = this.saving.then(() => this.write());
+    // The caller hears about a failed write; the writes queued behind it still run.
+    this.saving = write.catch(() => {});
+    return write;
+  }
+
+  private async write(): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(this.state, null, 2), 'utf8');
-    await rename(tempPath, this.filePath);
+    const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(tempPath, JSON.stringify(this.state, null, 2), 'utf8');
+      await rename(tempPath, this.filePath);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => {});
+      throw error;
+    }
   }
 }
